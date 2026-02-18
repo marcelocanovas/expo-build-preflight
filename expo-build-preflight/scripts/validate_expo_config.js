@@ -4,32 +4,63 @@ const fs = require('fs');
 const path = require('path');
 const { execSync } = require('child_process');
 
-// Default paths (can be passed via terminal arguments)
-const appJsonPath = process.argv[2] || path.join(process.cwd(), 'app.json');
+// We still take eas.json from args if needed, but app config is resolved by Expo CLI
 const easJsonPath = process.argv[3] || path.join(process.cwd(), 'eas.json');
 
 let hasFails = false;
 
 function logStatus(status, message) {
   const colorMap = {
-    '[PASS]': '\x1b[32m[PASS]\x1b[0m', // Green
-    '[WARN]': '\x1b[33m[WARN]\x1b[0m', // Yellow
-    '[FAIL]': '\x1b[31m[FAIL]\x1b[0m'  // Red
+    '[PASS]': '\x1b[32m[PASS]\x1b[0m',
+    '[WARN]': '\x1b[33m[WARN]\x1b[0m',
+    '[FAIL]': '\x1b[31m[FAIL]\x1b[0m'
   };
   console.log(`${colorMap[status] || status} ${message}`);
   if (status === '[FAIL]') hasFails = true;
 }
 
-function validateAppJson(appJson) {
-  console.log('\n--- Validating app.json ---');
-  const expo = appJson.expo;
-
-  if (!expo) {
-    logStatus('[FAIL]', "'expo' object not found in app.json.");
-    return;
+function checkLevelZeroPointFive() {
+  console.log('\n--- Level 0.5: Environment Validation ---');
+  if (!fs.existsSync('package.json')) {
+     logStatus('[FAIL]', 'package.json not found. Are you in the right directory?');
+     process.exit(1);
   }
 
-  // 1. Identifiers (Bundle ID / Package Name)
+  const pkg = JSON.parse(fs.readFileSync('package.json', 'utf-8'));
+  if (!pkg.dependencies || !pkg.dependencies.expo) {
+     logStatus('[FAIL]', 'This does not appear to be an Expo project. Missing "expo" in dependencies.');
+     process.exit(1);
+  }
+  logStatus('[PASS]', 'Expo project detected (found "expo" in dependencies).');
+
+  if (!fs.existsSync('node_modules')) {
+     logStatus('[FAIL]', 'node_modules not found. Please run npm/yarn/bun install before running the preflight check.');
+     process.exit(1);
+  }
+  logStatus('[PASS]', 'node_modules directory found.');
+}
+
+function getResolvedExpoConfig() {
+  console.log('\n--- Resolving Expo Configuration ---');
+  try {
+    // This evaluates app.json, app.config.js, or app.config.ts natively
+    const stdout = execSync('npx expo config --json', { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'ignore'] });
+    const parsed = JSON.parse(stdout);
+
+    if (!parsed.exp) throw new Error('Could not find "exp" object in compiled config.');
+    logStatus('[PASS]', 'Configuration evaluated successfully (supports app.config.js/ts).');
+    return { expo: parsed.exp };
+  } catch (e) {
+    logStatus('[FAIL]', 'Failed to evaluate Expo config. Ensure your app.config.js has no syntax errors.');
+    process.exit(1);
+  }
+}
+
+function validateAppJson(appJson) {
+  console.log('\n--- Validating Config Rules ---');
+  const expo = appJson.expo;
+
+  // 1. Identifiers
   const androidPackage = expo.android?.package;
   const iosBundle = expo.ios?.bundleIdentifier;
   const invalidDomainRegex = /^(com|br)\.(example|test|demo)\./i;
@@ -42,21 +73,24 @@ function validateAppJson(appJson) {
   else if (invalidDomainRegex.test(iosBundle)) logStatus('[FAIL]', `Invalid/test ios.bundleIdentifier: ${iosBundle}`);
   else logStatus('[PASS]', `Valid ios.bundleIdentifier: ${iosBundle}`);
 
-  // 2. Scheme (Deep Linking)
-  if (!expo.scheme) logStatus('[WARN]', 'Missing "scheme" property. Deep links/OAuth might not work.');
-  else logStatus('[PASS]', `Scheme configured: ${expo.scheme}`);
+  // 2. Scheme (Deep Linking) - RESTORED
+  if (!expo.scheme) {
+    logStatus('[WARN]', 'Missing "scheme" property. Deep links/OAuth might not work.');
+  } else {
+    logStatus('[PASS]', `Scheme configured: ${expo.scheme}`);
+  }
 
-  // 3. Runtime Version (OTA Updates)
+  // 3. Runtime Version
   const runtimeVersion = expo.runtimeVersion;
   if (!runtimeVersion) {
     logStatus('[WARN]', 'Missing "runtimeVersion". Required if using EAS Update.');
   } else if (typeof runtimeVersion === 'object' && runtimeVersion.policy === 'fingerprint') {
     logStatus('[PASS]', 'runtimeVersion configured with fingerprint policy.');
   } else {
-    logStatus('[WARN]', `runtimeVersion configured as "${JSON.stringify(runtimeVersion)}". Prefer {"policy": "fingerprint"} for safer OTAs.`);
+    logStatus('[WARN]', `runtimeVersion configured as "${JSON.stringify(runtimeVersion)}". Prefer {"policy": "fingerprint"}.`);
   }
 
-  // 4. Android Target SDK (2026 Rules: API 35)
+  // 4. Android Target SDK
   const targetSdk = expo.android?.targetSdkVersion;
   if (!targetSdk) {
     logStatus('[WARN]', 'targetSdkVersion not explicitly set. Expo will use the SDK default.');
@@ -66,7 +100,7 @@ function validateAppJson(appJson) {
     logStatus('[PASS]', `Valid targetSdkVersion: ${targetSdk}`);
   }
 
-  // 5. New Architecture
+  // 5. New Architecture - RESTORED
   if (expo.newArchEnabled === false) {
     logStatus('[WARN]', 'newArchEnabled is forced to false. Transitioning to Fabric/TurboModules is highly recommended in SDK 55+.');
   } else {
@@ -83,17 +117,15 @@ function validateEasJson(easJson) {
     return;
   }
 
-  // 1. Auto Increment
   if (prodProfile.autoIncrement !== true) {
-    logStatus('[FAIL]', 'build.production.autoIncrement is not set to true. Builds might overwrite existing versions in the stores.');
+    logStatus('[FAIL]', 'build.production.autoIncrement is not set to true. Builds might overwrite existing versions.');
   } else {
     logStatus('[PASS]', 'autoIncrement is active in the production profile.');
   }
 
-  // 2. Environment Variables
   const envVars = prodProfile.env || {};
   if (Object.keys(envVars).length === 0) {
-    logStatus('[WARN]', 'No environment variables (env) detected in the production profile. Ensure your base API is not pointing to localhost/staging.');
+    logStatus('[WARN]', 'No environment variables (env) detected in the production profile.');
   } else {
     logStatus('[PASS]', `Environment variables detected: ${Object.keys(envVars).join(', ')}`);
   }
@@ -102,68 +134,36 @@ function validateEasJson(easJson) {
 function checkLevelZeroBasics(appJson) {
   console.log('\n--- Level 0: Foundation Checks ---');
 
-  // 1. EAS JSON Existence
   if (!fs.existsSync(easJsonPath)) {
     logStatus('[FAIL]', 'eas.json not found! You must run "eas build:configure" first.');
-    // We stop immediately here because we can't proceed without it.
-    console.error('\x1b[31m[!] Critical failure. Run "eas build:configure" and try again.\x1b[0m\n');
     process.exit(1);
   } else {
     logStatus('[PASS]', 'eas.json exists.');
   }
 
-  // 2. Project ID Existence
   const projectId = appJson.expo?.extra?.eas?.projectId;
   if (!projectId) {
-    logStatus('[FAIL]', 'Missing expo.extra.eas.projectId in app.json. You must run "eas init" to link this project to Expo.');
+    logStatus('[FAIL]', 'Missing expo.extra.eas.projectId. You must run "eas init" to link this project.');
   } else {
     logStatus('[PASS]', `Project linked to EAS (ID: ${projectId}).`);
   }
 
-  // 3. Lockfile Existence
   const lockfiles = ['package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', 'bun.lockb'];
-  const hasLockfile = lockfiles.some(file => fs.existsSync(path.join(process.cwd(), file)));
-  if (!hasLockfile) {
-    logStatus('[FAIL]', 'No lockfile found (package-lock.json, yarn.lock, etc.). Cloud builds will be unpredictable. Please generate and commit a lockfile.');
+  if (!lockfiles.some(file => fs.existsSync(path.join(process.cwd(), file)))) {
+    logStatus('[FAIL]', 'No lockfile found. Cloud builds will be unpredictable.');
   } else {
     logStatus('[PASS]', 'Lockfile detected.');
   }
 
-  // 4. Git Working Tree Status
   try {
-    const gitStatus = execSync('git status --porcelain').toString().trim();
-    if (gitStatus.length > 0) {
-      logStatus('[WARN]', 'You have uncommitted Git changes. EAS Build uploads your committed code by default. Uncommitted changes might not be included in the build!');
+    if (execSync('git status --porcelain').toString().trim().length > 0) {
+      logStatus('[WARN]', 'You have uncommitted Git changes. EAS uploads committed code by default!');
     } else {
       logStatus('[PASS]', 'Git working tree is clean.');
     }
   } catch (e) {
-    logStatus('[WARN]', 'Could not check Git status. Ensure you are in a valid Git repository.');
+    logStatus('[WARN]', 'Could not check Git status.');
   }
-}
-
-function checkLevelZeroPointFive() {
-  console.log('\n--- Level 0.5: Environment Validation ---');
-  // 1. Check package.json
-  if (!fs.existsSync('package.json')) {
-     logStatus('[FAIL]', 'package.json not found. Are you in the right directory?');
-     process.exit(1);
-  }
-
-  // 2. Check for Expo
-  const pkg = JSON.parse(fs.readFileSync('package.json', 'utf-8'));
-  if (!pkg.dependencies || !pkg.dependencies.expo) {
-     logStatus('[FAIL]', 'This does not appear to be an Expo project. Missing "expo" in dependencies.');
-     process.exit(1);
-  }
-  logStatus('[PASS]', 'Expo project detected (found "expo" in package.json dependencies).');
-
-  // 3. Check for node_modules
-  if (!fs.existsSync('node_modules')) {
-     logStatus('[FAIL]', 'node_modules not found. Please run npm/yarn/bun install before running the preflight check.');
-     process.exit(1);
-  }
-  logStatus('[PASS]', 'node_modules directory found.');
 }
 
 function run() {
@@ -171,20 +171,10 @@ function run() {
 
   checkLevelZeroPointFive();
 
-  // Load app.json first so we can pass it to the Level 0 checks
-  let appJson;
-  try {
-    const appJsonRaw = fs.readFileSync(appJsonPath, 'utf-8');
-    appJson = JSON.parse(appJsonRaw);
-  } catch (e) {
-    logStatus('[FAIL]', `Error reading ${appJsonPath}: ${e.message}`);
-    process.exit(1);
-  }
+  // This replaces fs.readFileSync(appJsonPath)
+  const appJson = getResolvedExpoConfig();
 
-  // Run the new Level 0 checks
   checkLevelZeroBasics(appJson);
-
-  // Run the platform configurations we wrote earlier
   validateAppJson(appJson);
 
   try {
