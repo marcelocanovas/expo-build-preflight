@@ -26,13 +26,13 @@ If you want to run the pre-flight checks manually:
 2. **Run Configuration Check:**
 ```bash
    node scripts/validate_expo_config.js
+```
 3. Run Asset Check:
 ```bash
-   node scripts/validate_expo_config.js
 # (Optional) Install image-size for dimension validation
 npm install --save-dev image-size
 node scripts/check_assets.js
-
+```
 
 ## For AI Agents (Claude / Gemini / GPTs)
 Point your agent to this repository. The agent will read SKILL.md and follow the instructions to perform the audit on your behalf.
